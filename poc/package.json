@@ -1,0 +1,37 @@
+{
+  "name": "shalom-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Microservicio de integracion con Shalom PRO (registro masivo, rotulos y tracking)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "login": "tsx poc/login.ts",
+    "login:check": "tsx poc/login.ts --check",
+    "session": "tsx poc/session-check.ts",
+    "probe": "tsx poc/probe.ts",
+    "explore": "tsx poc/explore.ts",
+    "masivo": "tsx poc/masivo.ts",
+    "plantilla": "tsx poc/plantilla.ts",
+    "upload": "tsx poc/upload.ts",
+    "review": "tsx poc/review.ts",
+    "inspect": "tsx poc/inspect.ts",
+    "build-file": "tsx poc/build-file.ts",
+    "individual": "tsx poc/individual-flow.ts",
+    "tracking": "tsx poc/tracking.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.0",
+    "dotenv": "^17.2.3",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "playwright": "^1.65.1"
+  }
+}

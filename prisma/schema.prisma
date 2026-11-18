@@ -1,0 +1,283 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Environment {
+  SANDBOX
+  PRODUCTION
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ApplicationStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum ShalomSessionStatus {
+  ACTIVE
+  EXPIRED
+  REQUIERE_LOGIN_MANUAL
+}
+
+enum ShalomJobType {
+  REGISTER_ORDER
+  TRACKING
+}
+
+enum ShalomJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  DEAD
+}
+
+enum ShalomOrderStatus {
+  REGISTRADO
+  EN_ORIGEN
+  EN_TRANSITO
+  ENTREGADO
+  INCIDENCIA
+  ANULADO
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+  DEAD
+}
+
+/// Empresa duena de una cuenta Shalom PRO.
+model Tenant {
+  id     String       @id @default(uuid()) @db.Uuid
+  code   String       @unique @db.VarChar(50)
+  name   String       @db.VarChar(120)
+  status TenantStatus @default(ACTIVE)
+
+  // Limites operativos configurables por tenant
+  maxOrdersPerDay Int    @default(200) @map("max_orders_per_day")
+  windowStart     String @default("07:00") @map("window_start") @db.VarChar(5)
+  windowEnd       String @default("21:00") @map("window_end") @db.VarChar(5)
+  timezone        String @default("America/Lima") @db.VarChar(50)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  credentials  ShalomCredential?
+  session      ShalomSession?
+  applications Application[]
+  jobs         ShalomJob[]
+  orders       ShalomOrder[]
+
+  @@map("tenant")
+}
+
+/// Credenciales de Shalom PRO del tenant. La contrasena se guarda cifrada
+/// (AES-256-GCM, formato v1.<iv>.<tag>.<ciphertext>) con contexto por tenant.
+model ShalomCredential {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenantId          String   @unique @map("tenant_id") @db.Uuid
+  username          String   @db.VarChar(160)
+  encryptedPassword String   @map("encrypted_password") @db.Text
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("shalom_credential")
+}
+
+/// Storage state cifrado de la sesion de Shalom por tenant.
+model ShalomSession {
+  id                    String              @id @default(uuid()) @db.Uuid
+  tenantId              String              @unique @map("tenant_id") @db.Uuid
+  encryptedStorageState String              @map("encrypted_storage_state") @db.Text
+  status                ShalomSessionStatus @default(ACTIVE)
+  lastLoginAt           DateTime?           @map("last_login_at") @db.Timestamptz(6)
+  lastError             String?             @map("last_error") @db.VarChar(500)
+  expiresAt             DateTime?           @map("expires_at") @db.Timestamptz(6)
+  createdAt             DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("shalom_session")
+}
+
+/// Aplicacion que consume la API (Nuvex, apps a medida, etc.).
+model Application {
+  id        String            @id @default(uuid()) @db.Uuid
+  tenantId  String            @map("tenant_id") @db.Uuid
+  code      String            @db.VarChar(50)
+  name      String            @db.VarChar(120)
+  status    ApplicationStatus @default(ACTIVE)
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  apiKeys          ApiKey[]
+  jobs             ShalomJob[]
+  webhookEndpoints WebhookEndpoint[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, status])
+  @@map("application")
+}
+
+/// API key: solo se guarda el prefijo visible y el HMAC-SHA-256 de la key.
+model ApiKey {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @map("application_id") @db.Uuid
+  prefix        String      @db.VarChar(20)
+  hashedKey     String      @unique @map("hashed_key") @db.VarChar(64)
+  environment   Environment @default(PRODUCTION)
+  scopes        String[]    @default([])
+  expiresAt     DateTime?   @map("expires_at") @db.Timestamptz(6)
+  revokedAt     DateTime?   @map("revoked_at") @db.Timestamptz(6)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, revokedAt])
+  @@map("api_key")
+}
+
+/// Cola durable en PostgreSQL (FOR UPDATE SKIP LOCKED).
+model ShalomJob {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @map("tenant_id") @db.Uuid
+  applicationId  String?         @map("application_id") @db.Uuid
+  type           ShalomJobType
+  status         ShalomJobStatus @default(PENDING)
+  payload        Json
+  result         Json?
+  errorMessage   String?         @map("error_message") @db.VarChar(500)
+  idempotencyKey String?         @map("idempotency_key") @db.VarChar(120)
+  attempts       Int             @default(0)
+  maxAttempts    Int             @default(3) @map("max_attempts")
+  nextAttemptAt  DateTime        @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  lockedBy       String?         @map("locked_by") @db.VarChar(80)
+  lockedAt       DateTime?       @map("locked_at") @db.Timestamptz(6)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  finishedAt     DateTime?       @map("finished_at") @db.Timestamptz(6)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, status])
+  @@map("shalom_job")
+}
+
+/// Envio registrado en Shalom.
+model ShalomOrder {
+  id            String            @id @default(cuid()) @db.VarChar(30)
+  tenantId      String            @map("tenant_id") @db.Uuid
+  applicationId String?           @map("application_id") @db.Uuid
+  externalRef   String?           @map("external_ref") @db.VarChar(60)
+  orden         String?           @db.VarChar(20)
+  codigo        String?           @db.VarChar(10)
+  monto         Decimal?          @db.Decimal(10, 2)
+  status        ShalomOrderStatus @default(REGISTRADO)
+
+  destinatarioDoc  String    @map("destinatario_doc") @db.VarChar(12)
+  origen           String    @db.VarChar(120)
+  destino          String    @db.VarChar(120)
+  paquete          String    @db.VarChar(40)
+  trackingStatus   String?   @map("tracking_status") @db.VarChar(120)
+  trackingProgress Int?      @map("tracking_progress")
+  lastTrackedAt    DateTime? @map("last_tracked_at") @db.Timestamptz(6)
+
+  registeredAt DateTime @default(now()) @map("registered_at") @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  events ShalomEvent[]
+
+  @@unique([tenantId, externalRef])
+  @@unique([tenantId, orden])
+  @@index([tenantId, status])
+  @@map("shalom_order")
+}
+
+/// Historial de estados (solo se inserta cuando cambia).
+model ShalomEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  orderId     String   @map("order_id") @db.VarChar(30)
+  status      String   @db.VarChar(120)
+  progress    Int?
+  description String?  @db.VarChar(300)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  order ShalomOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("shalom_event")
+}
+
+model WebhookEndpoint {
+  id            String   @id @default(uuid()) @db.Uuid
+  applicationId String   @map("application_id") @db.Uuid
+  url           String   @db.VarChar(500)
+  secret        String   @db.VarChar(120)
+  events        String[] @default([])
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  deliveries  WebhookDelivery[]
+
+  @@index([applicationId, active])
+  @@map("webhook_endpoint")
+}
+
+model WebhookDelivery {
+  id            String                @id @default(uuid()) @db.Uuid
+  endpointId    String                @map("endpoint_id") @db.Uuid
+  event         String                @db.VarChar(80)
+  payload       Json
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  maxAttempts   Int                   @default(5) @map("max_attempts")
+  nextAttemptAt DateTime              @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  lockedBy      String?               @map("locked_by") @db.VarChar(80)
+  lockedAt      DateTime?             @map("locked_at") @db.Timestamptz(6)
+  lastError     String?               @map("last_error") @db.VarChar(500)
+  createdAt     DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  deliveredAt   DateTime?             @map("delivered_at") @db.Timestamptz(6)
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([endpointId, createdAt])
+  @@map("webhook_delivery")
+}
+
+/// Registro de cambios administrativos (quien hizo que y cuando).
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String?  @map("tenant_id") @db.Uuid
+  actor     String   @db.VarChar(80)
+  action    String   @db.VarChar(60)
+  target    String?  @db.VarChar(120)
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([tenantId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_log")
+}

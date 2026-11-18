@@ -1,0 +1,14 @@
+[
+  {
+    "destinatario": "00000000",
+    "telefono": "999999999",
+    "origen": "AV TACNA",
+    "destino": "ZAMACOLA",
+    "mercaderia": "PAQUETE S",
+    "alto": 0.3,
+    "ancho": 0.3,
+    "largo": 0.12,
+    "peso": 2,
+    "cantidad": 1
+  }
+]

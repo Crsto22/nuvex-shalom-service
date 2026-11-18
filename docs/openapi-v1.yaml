@@ -1,0 +1,587 @@
+openapi: 3.0.3
+info:
+  title: Shalom Service API
+  version: 1.0.0
+  description: |
+    Microservicio multiempresa para registrar envíos individuales en Shalom PRO.
+
+    Autenticación: `Authorization: Bearer <api key>` (por aplicación).
+    Administración: `X-Admin-Token`.
+
+    Errores del driver: `422` (datos rechazados por Shalom), `503` (fallo temporal),
+    `409` (sesión requiere login manual).
+
+servers:
+  - url: http://localhost:4100/v1
+    description: Local
+
+tags:
+  - name: Operación
+  - name: Administración
+
+paths:
+  /health:
+    get:
+      tags: [Operación]
+      summary: Salud y métricas
+      security: []
+      responses:
+        '200':
+          description: Estado del servicio
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  database: { type: string, enum: [up, down] }
+                  metrics:
+                    type: object
+                    properties:
+                      jobs:
+                        type: object
+                        properties:
+                          pending: { type: integer }
+                          processing: { type: integer }
+                          dead: { type: integer }
+                      orders:
+                        type: object
+                        properties:
+                          active: { type: integer }
+                          last24h: { type: integer }
+                      sessions:
+                        type: object
+                        properties:
+                          active: { type: integer }
+                          requiresLogin: { type: integer }
+
+  /sessions/{tenantId}/login:
+    post:
+      tags: [Operación]
+      summary: Inicia sesión en Shalom y guarda el storage state cifrado
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Resultado del login
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, format: uuid }
+                  status: { type: string, enum: [ACTIVE, EXPIRED, REQUIERE_LOGIN_MANUAL] }
+                  outcome: { type: string }
+                  message: { type: string, nullable: true }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /sessions/{tenantId}:
+    get:
+      tags: [Operación]
+      summary: Estado de la sesión
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Sesión actual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, format: uuid }
+                  status: { type: string }
+                  lastLoginAt: { type: string, format: date-time, nullable: true }
+                  lastError: { type: string, nullable: true }
+
+  /tenants/{tenantId}/orders:
+    post:
+      tags: [Operación]
+      summary: Registra un envío individual
+      description: |
+        Con `wait=true` espera (hasta 3 min) y devuelve orden y código en la misma respuesta.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: wait
+          in: query
+          schema: { type: boolean, default: false }
+        - name: Idempotency-Key
+          in: header
+          schema: { type: string, maxLength: 120 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrder'
+      responses:
+        '201':
+          description: Job encolado o resultado completo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateOrderResponse'
+        '400':
+          description: Datos inválidos (clave de seguridad, documento, etc.)
+        '429':
+          description: Límite diario alcanzado
+        '422':
+          description: Shalom rechazó el registro
+
+  /jobs/{jobId}:
+    get:
+      tags: [Operación]
+      summary: Estado del job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+
+  /orders/{orderId}:
+    get:
+      tags: [Operación]
+      summary: Orden registrada
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Orden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+
+  /orders/{orderId}/tracking:
+    get:
+      tags: [Operación]
+      summary: Estado guardado + historial (sin abrir navegador)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Rastreo guardado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoredTracking'
+
+  /orders/{orderId}/track:
+    post:
+      tags: [Operación]
+      summary: Encola un rastreo puntual
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '201':
+          description: Job de rastreo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobId: { type: string, nullable: true }
+                  status: { type: string }
+
+  /tracking:
+    get:
+      tags: [Operación]
+      summary: Rastreo en vivo (abre navegador, 10-20 s)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orden
+          in: query
+          required: true
+          schema: { type: string, pattern: '^\d{6,12}$' }
+        - name: codigo
+          in: query
+          schema: { type: string, maxLength: 8 }
+      responses:
+        '200':
+          description: Rastreo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tracking'
+        '422':
+          description: Shalom no devolvió resultados (orden expirada o inexistente)
+        '503':
+          description: Sitio de Shalom no disponible
+
+  /admin/applications/{applicationId}/api-keys:
+    post:
+      tags: [Administración]
+      summary: Crea una API key (se muestra una sola vez)
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                environment: { type: string, enum: [SANDBOX, PRODUCTION] }
+                scopes:
+                  type: array
+                  items: { type: string }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        '201':
+          description: API key creada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  apiKey: { type: string, description: Se muestra una sola vez }
+                  scopes: { type: array, items: { type: string } }
+    get:
+      tags: [Administración]
+      summary: Lista las API keys (sin el secreto)
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Lista
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /admin/api-keys/{apiKeyId}:
+    delete:
+      tags: [Administración]
+      summary: Revoca una API key
+      security:
+        - adminToken: []
+      parameters:
+        - name: apiKeyId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Revocada }
+
+  /admin/applications/{applicationId}/webhooks:
+    post:
+      tags: [Administración]
+      summary: Registra un endpoint de webhooks
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, format: uri }
+                events:
+                  type: array
+                  items: { type: string, enum: [order.registered, order.status_changed] }
+      responses:
+        '201':
+          description: Endpoint creado (incluye el secreto de firma una sola vez)
+    get:
+      tags: [Administración]
+      summary: Lista endpoints y últimas entregas
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200': { description: Lista }
+
+  /admin/tenants:
+    post:
+      tags: [Administración]
+      summary: Alta completa de empresa (tenant + aplicación + API key, credenciales opcionales)
+      security:
+        - adminToken: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name]
+              properties:
+                code: { type: string, pattern: '^[a-z0-9-]{2,50}$' }
+                name: { type: string, maxLength: 120 }
+                username: { type: string, format: email }
+                password: { type: string, minLength: 6 }
+                applicationCode: { type: string }
+                applicationName: { type: string }
+      responses:
+        '201':
+          description: Empresa creada (la apiKey se muestra una sola vez)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, format: uuid }
+                  applicationId: { type: string, format: uuid }
+                  apiKey: { type: string }
+                  apiKeyPrefix: { type: string }
+                  credentialsConfigured: { type: boolean }
+        '409':
+          description: El code ya existe o faltó username/password
+
+  /admin/tenants/{tenantId}/validate-credentials:
+    post:
+      tags: [Administración]
+      summary: Prueba el login de Shalom con las credenciales guardadas
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Resultado del login
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  status: { type: string }
+                  outcome: { type: string, nullable: true }
+                  message: { type: string, nullable: true }
+
+  /admin/audit:
+    get:
+      tags: [Administración]
+      summary: Historial de cambios administrativos
+      security:
+        - adminToken: []
+      parameters:
+        - name: tenantId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Entradas de auditoría
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    tenantId: { type: string, nullable: true }
+                    actor: { type: string }
+                    action: { type: string }
+                    target: { type: string, nullable: true }
+                    metadata: { type: object, nullable: true }
+                    createdAt: { type: string, format: date-time }
+
+  /admin/sessions:    get:
+      tags: [Administración]
+      summary: Estado de sesión de todas las empresas
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: Sesiones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    tenantId: { type: string }
+                    code: { type: string }
+                    status: { type: string }
+                    lastLoginAt: { type: string, nullable: true }
+                    lastError: { type: string, nullable: true }
+
+  /admin/tenants/{tenantId}/credentials:
+    put:
+      tags: [Administración]
+      summary: Guarda las credenciales de Shalom (cifradas)
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, format: email }
+                password: { type: string, minLength: 6 }
+      responses:
+        '200': { description: Guardadas }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API key de la aplicación (shm_live_...)
+    adminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+
+  parameters:
+    TenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ApplicationId:
+      name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Forbidden:
+      description: La API key no pertenece a este tenant o le faltan scopes
+
+  schemas:
+    CreateOrder:
+      type: object
+      required: [recipientDocument, originAgency, destinationAgency, packageType, securityKey]
+      properties:
+        externalRef: { type: string, maxLength: 60 }
+        idempotencyKey: { type: string, maxLength: 120 }
+        documentType: { type: string, enum: [DNI, RUC, CE], default: DNI }
+        recipientDocument: { type: string, pattern: '^\d{6,12}$' }
+        recipientName: { type: string, maxLength: 80 }
+        recipientPaternalLastName: { type: string, maxLength: 80 }
+        recipientMaternalLastName: { type: string, maxLength: 80 }
+        businessName: { type: string, maxLength: 120 }
+        recipientPhone: { type: string, pattern: '^\d{6,12}$' }
+        originAgency: { type: string, maxLength: 120 }
+        destinationAgency: { type: string, maxLength: 120 }
+        packageType:
+          type: string
+          enum: [SOBRE, PAQUETE XXS, PAQUETE XS, PAQUETE S, PAQUETE M, PAQUETE L]
+        securityKey:
+          type: string
+          pattern: '^\d{4}$'
+          description: Clave de 4 dígitos; Shalom rechaza consecutivas y repetidas
+        declarationType:
+          type: string
+          enum: [Articulos de uso personal, Documentos, Ropa, Electrodomesticos]
+        extraSecurity: { type: boolean, default: false }
+        cashOnDelivery: { type: boolean, default: false }
+
+    CreateOrderResponse:
+      type: object
+      properties:
+        jobId: { type: string, format: uuid }
+        status: { type: string, enum: [PENDING, PROCESSING, COMPLETED, DEAD, FAILED] }
+        result:
+          type: object
+          nullable: true
+          properties:
+            orderId: { type: string }
+            orden: { type: string, nullable: true }
+            codigo: { type: string, nullable: true }
+            monto: { type: number, nullable: true }
+        error: { type: string, nullable: true }
+
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [REGISTER_ORDER, TRACKING] }
+        status: { type: string }
+        attempts: { type: integer }
+        errorMessage: { type: string, nullable: true }
+        result: { type: object, nullable: true }
+
+    Order:
+      type: object
+      properties:
+        id: { type: string }
+        externalRef: { type: string, nullable: true }
+        orden: { type: string, nullable: true }
+        codigo: { type: string, nullable: true }
+        monto: { type: number, nullable: true }
+        status: { type: string }
+        registeredAt: { type: string, format: date-time }
+
+    StoredTracking:
+      type: object
+      properties:
+        id: { type: string }
+        orden: { type: string, nullable: true }
+        codigo: { type: string, nullable: true }
+        status: { type: string }
+        trackingStatus: { type: string, nullable: true }
+        trackingProgress: { type: integer, nullable: true }
+        lastTrackedAt: { type: string, format: date-time, nullable: true }
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string }
+              progress: { type: integer, nullable: true }
+              description: { type: string, nullable: true }
+              createdAt: { type: string, format: date-time }
+
+    Tracking:
+      type: object
+      properties:
+        orden: { type: string }
+        codigo: { type: string, nullable: true }
+        estado: { type: string, nullable: true }
+        mensaje: { type: string, nullable: true }
+        fecha: { type: string, nullable: true }
+        progreso: { type: integer }
+        status: { type: string }
+        pasos:
+          type: array
+          items:
+            type: object
+            properties:
+              nombre: { type: string }
+              activo: { type: boolean }

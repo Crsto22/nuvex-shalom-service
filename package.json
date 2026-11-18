@@ -1,0 +1,63 @@
+{
+  "name": "shalom-service",
+  "version": "0.1.0",
+  "description": "Microservicio multiempresa de integracion con Shalom PRO",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "npm run build:api && npm run build:worker",
+    "build:api": "nest build api",
+    "build:worker": "nest build worker",
+    "db:generate": "prisma generate",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:validate": "prisma validate",
+    "db:format": "prisma format",
+    "start:api:dev": "nest start api --watch",
+    "start:worker:dev": "nest start worker --watch",
+    "start:api:prod": "node --enable-source-maps dist/apps/api/apps/api/src/main.js",
+    "start:worker:prod": "node --enable-source-maps dist/apps/worker/apps/worker/src/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest --runInBand",
+    "tenant:create": "node --env-file=.env -r ts-node/register scripts/create-tenant.ts",
+    "bootstrap": "node --env-file=.env -r ts-node/register/transpile-only scripts/bootstrap.ts",
+    "setup": "prisma migrate deploy && npm run bootstrap",
+    "backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-db.ps1",
+    "alerts": "node scripts/check-alerts.mjs",
+    "smoke:driver": "node --env-file=.env --env-file=poc/.env -r ts-node/register scripts/smoke-driver.ts",
+    "check": "npm run db:validate && npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/platform-express": "^11.1.28",
+    "@nestjs/throttler": "^6.5.0",
+    "@prisma/client": "^6.19.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "helmet": "^8.1.0",
+    "playwright": "^1.65.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.1.28",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.7.0",
+    "jest": "^30.0.0",
+    "prisma": "^6.19.3",
+    "source-map-support": "^0.5.21",
+    "ts-jest": "^29.2.5",
+    "ts-loader": "^9.5.2",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.9.3"
+  }
+}

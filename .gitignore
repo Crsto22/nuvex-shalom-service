@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+
+# Secretos
+.env
+.env.local
+.env.production
+
+# Perfiles de navegador (cookies de sesion)
+.profile/
+.profile-*/
+tmp/
+
+# Artefactos del POC
+poc/out/
+poc/.profile/
+poc/node_modules/
+poc/.env
+*.log
+
+# Backups locales
+backups/
