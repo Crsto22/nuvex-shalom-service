@@ -1,7 +1,20 @@
-version: '2.4'
-
-# Compatible con docker-compose v1 (sin x-*, sin deploy:, con mem_limit).
-# Puertos distintos a facturacion: API 4100 (billing 3100) y Postgres 5433.
+x-shalom-service: &shalom-service
+  image: shalom-service:${IMAGE_TAG:-latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment:
+    NODE_ENV: production
+    API_HOST: 0.0.0.0
+    API_PORT: 4100
+    DATABASE_URL: postgresql://${POSTGRES_USER:-nuvex_shalom}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requerido}@postgres:5432/${POSTGRES_DB:-nuvex_shalom}?schema=public
+    TZ: America/Lima
+  networks:
+    - shalom-network
+  # Chromium necesita memoria compartida; con el default de Docker (64 MB) se cae.
+  shm_size: '1gb'
 
 services:
   postgres:
@@ -25,19 +38,8 @@ services:
       - shalom-network
 
   api:
-    image: shalom-service:${IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *shalom-service
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      NODE_ENV: production
-      API_HOST: 0.0.0.0
-      API_PORT: 4100
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nuvex_shalom}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requerido}@postgres:5432/${POSTGRES_DB:-nuvex_shalom}?schema=public
-      TZ: America/Lima
     command:
       - sh
       - -c
@@ -48,33 +50,15 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:4100/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      test: ['CMD', 'curl', '--fail', '--silent', 'http://127.0.0.1:4100/v1/health']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    shm_size: '1gb'
-    networks:
-      - shalom-network
+      start_period: 20s
 
   worker:
-    image: shalom-service:${IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *shalom-service
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      NODE_ENV: production
-      API_HOST: 0.0.0.0
-      API_PORT: 4100
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nuvex_shalom}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requerido}@postgres:5432/${POSTGRES_DB:-nuvex_shalom}?schema=public
-      TZ: America/Lima
     command:
       - node
       - --enable-source-maps
@@ -82,10 +66,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    shm_size: '1gb'
-    mem_limit: 2g
-    networks:
-      - shalom-network
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          # Ajustar segun benchmark de la Fase 7
+          memory: 2g
 
 volumes:
   shalom-postgres-data:
