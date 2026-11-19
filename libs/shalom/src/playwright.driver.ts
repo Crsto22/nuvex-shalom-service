@@ -516,24 +516,32 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       .join(' | ');
     const fields = await page
       .evaluate(() => {
-        const read = (selector: string) => {
-          const element = document.querySelector<HTMLInputElement>(selector);
-          if (!element || element.offsetParent === null) return null;
-          return {
+        const isVisible = (element: HTMLElement | null) =>
+          Boolean(element && element.offsetParent !== null);
+
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLInputElement>('input'),
+        )
+          .filter((element) => isVisible(element) && element.type !== 'hidden')
+          .slice(0, 12)
+          .map((element) => ({
+            id: element.id || null,
+            placeholder: element.placeholder || null,
+            tipo: element.type,
             valor: element.value,
+            marcado: element.checked,
             requerido: element.required,
-            invalido:
-              element.classList.contains('is-invalid') ||
-              element.getAttribute('aria-invalid') === 'true',
-          };
-        };
-        return {
-          documento: read('input[placeholder="DNI"], input[placeholder="RUC"], input[placeholder="CE"]'),
-          nombres: read('#names-input'),
-          paterno: read('input[placeholder="Apellido paterno"]'),
-          materno: read('input[placeholder="Apellido materno"]'),
-          celular: read('#phone-input'),
-        };
+          }));
+
+        const alerts = Array.from(
+          document.querySelectorAll<HTMLElement>('.swal2-container'),
+        )
+          .filter((element) => isVisible(element))
+          .map((element) =>
+            (element.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+          );
+
+        return { inputs, alerts };
       })
       .catch(() => null);
 
@@ -699,22 +707,32 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     }
 
     if ((await nameInput.count()) > 0 && (await nameInput.isVisible().catch(() => false))) {
-      const current = (await nameInput.inputValue().catch(() => '')).trim();
+      // Dar tiempo a que Shalom autocomplete desde RENIEC antes de escribir.
+      let current = '';
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        current = (await nameInput.inputValue().catch(() => '')).trim();
+        if (current) break;
+        await page.waitForTimeout(500);
+      }
+
       if (!current) {
-        if (!input.recipientName) {
+        const missing = [
+          !input.recipientName ? 'nombres' : null,
+          !input.recipientPaternalLastName ? 'apellido paterno' : null,
+          !input.recipientMaternalLastName ? 'apellido materno' : null,
+        ].filter(Boolean);
+
+        if (missing.length > 0) {
           throw new ShalomError(
-            'Shalom no reconocio el documento; envia recipientName, apellidos y recipientPhone',
+            `Shalom no reconocio el documento ${input.recipientDocument}; faltan ${missing.join(', ')}. Completa los datos del destinatario en Nuvex.`,
             'PERMANENT',
           );
         }
 
-        await nameInput.fill(input.recipientName);
-        if (input.recipientPaternalLastName) {
-          await paternal.fill(input.recipientPaternalLastName);
-        }
-        if (input.recipientMaternalLastName) {
-          await maternal.fill(input.recipientMaternalLastName);
-        }
+        await nameInput.fill(input.recipientName!);
+        await paternal.fill(input.recipientPaternalLastName!);
+        await maternal.fill(input.recipientMaternalLastName!);
         await page.waitForTimeout(300);
       }
     }
@@ -726,7 +744,8 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     }
   }
 
-  private async selectDeclaration(page: Page, type?: string): Promise<void> {    const map: Record<string, string> = {
+  private async selectDeclaration(page: Page, type?: string): Promise<void> {
+    const map: Record<string, string> = {
       'Articulos de uso personal': SHALOM_SELECTORS.individual.declarationRadio,
       Documentos: '#declaracion_jurada_docs',
       Ropa: '#declaracion_jurada_ropa',
@@ -736,10 +755,26 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     const label = page.locator(`label[for="${selector.replace('#', '')}"]`);
 
     const visible = await this.visibleLocator(label, 3_000);
-    if (!visible) return;
+    if (visible) {
+      await visible.click({ timeout: 5_000 }).catch(() => undefined);
+      await page.waitForTimeout(400);
+    }
 
-    await visible.click({ timeout: 5_000 });
-    await page.waitForTimeout(400);
+    // Shalom exige una declaracion jurada: si quedo vacia se elige la primera.
+    const checked = await page
+      .locator('input[id^="declaracion_jurada_"]:checked')
+      .count()
+      .catch(() => 0);
+    if (checked > 0) return;
+
+    const fallback = await this.visibleLocator(
+      page.locator('label[for^="declaracion_jurada_"]'),
+      2_000,
+    );
+    if (fallback) {
+      await fallback.click({ timeout: 3_000 }).catch(() => undefined);
+      await page.waitForTimeout(300);
+    }
   }
 
   private async enterSecurityKey(page: Page, key: string): Promise<void> {
