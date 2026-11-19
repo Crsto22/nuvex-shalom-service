@@ -158,7 +158,9 @@ export class ShalomJobProcessor {
 
     const tracking = await this.driver.tracking(order.orden, order.codigo);
     const mapped = mapTracking(tracking);
-    const changed = mapped.status !== order.status;
+    const changed =
+      mapped.status !== order.status ||
+      mapped.progress !== (order.trackingProgress ?? 0);
 
     await this.prisma.shalomOrder.update({
       where: { id: order.id },
@@ -191,6 +193,8 @@ export class ShalomJobProcessor {
           status: mapped.status,
           progress: mapped.progress,
           label: mapped.label,
+          message: tracking.mensaje ?? null,
+          steps: tracking.pasos,
         },
       });
     }
