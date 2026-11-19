@@ -118,7 +118,9 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       await this.clickContinue(page);
 
       // Paso 4: remitente / destinatario
+      await this.dismissPopups(page);
       await this.fillRecipient(page, input);
+      await this.dismissPopups(page);
 
       await this.selectDeclaration(page, input.declarationType);
       await this.clickContinue(page);
@@ -140,6 +142,7 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       await this.enterSecurityKey(page, input.securityKey);
       await page.waitForTimeout(800);
       await this.clickContinue(page);
+      await this.dismissPopups(page);
 
       // Resultado
       const result = await this.readRegistrationResult(page);
@@ -337,11 +340,34 @@ export class PlaywrightShalomDriver implements ShalomDriver {
   }
 
   private async dismissPopups(page: Page): Promise<void> {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       const close = page.locator(SHALOM_SELECTORS.popups.loyaltyClose).first();
-      if ((await close.count()) === 0 || !(await close.isVisible().catch(() => false))) return;
-      await close.click({ timeout: 3_000 }).catch(() => undefined);
-      await page.waitForTimeout(500);
+      if (await close.isVisible().catch(() => false)) {
+        await close.click({ timeout: 3_000 }).catch(() => undefined);
+        await page.waitForTimeout(500);
+        continue;
+      }
+
+      // Alertas de Shalom (sweetalert2) que bloquean el asistente.
+      const alert = page.locator('.swal2-container:visible').first();
+      if (!(await alert.isVisible().catch(() => false))) return;
+
+      const confirm = alert.locator('.swal2-confirm').first();
+      const cancel = alert.locator('.swal2-cancel').first();
+      let target = confirm;
+      if (!(await confirm.isVisible().catch(() => false))) {
+        target = (await cancel.isVisible().catch(() => false))
+          ? cancel
+          : alert.locator('button').first();
+      }
+
+      const title = (await alert.innerText().catch(() => ''))
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 160);
+      await target.click({ timeout: 3_000 }).catch(() => undefined);
+      this.logger.log(`[registro] alerta de Shalom aceptada: "${title}"`);
+      await page.waitForTimeout(700);
     }
   }
 
@@ -453,29 +479,68 @@ export class PlaywrightShalomDriver implements ShalomDriver {
 
   /**
    * Si el formulario del destinatario sigue visible es porque Shalom rechazo
-   * algun dato (documento, nombres o telefono). Fallar como PERMANENT evita
-   * gastar los reintentos del job y deja el motivo visible.
+   * algun dato o hay una alerta abierta. Se intenta cerrar la alerta y
+   * reintentar una vez; si persiste, falla como PERMANENT con el detalle.
    */
   private async assertAdvancedPastRecipient(page: Page): Promise<void> {
-    await page.waitForTimeout(2_000);
+    await page.waitForTimeout(1_500);
 
     const docInput = page
       .locator(SHALOM_SELECTORS.individual.recipient.docInput)
       .first();
-    const stillThere = await docInput.isVisible().catch(() => false);
-    if (!stillThere) return;
+    if (!(await docInput.isVisible().catch(() => false))) return;
+
+    // Alerta de Shalom bloqueando el asistente.
+    await this.dismissPopups(page);
+    const continueButton = await this.visibleLocator(
+      page
+        .locator(SHALOM_SELECTORS.individual.continueButton)
+        .filter({ hasText: /continuar/i }),
+      5_000,
+    );
+    if (continueButton) {
+      await continueButton.click({ timeout: 8_000 }).catch(() => undefined);
+      await page.waitForTimeout(2_500);
+    }
+    if (!(await docInput.isVisible().catch(() => false))) return;
 
     const errors = await page
-      .locator('.invalid-feedback, .text-danger, .swal2-html-container, .swal2-title')
+      .locator(
+        '.invalid-feedback:visible, .text-danger:visible, .swal2-container:visible .swal2-html-container',
+      )
       .allInnerTexts()
       .catch(() => []);
     const detail = errors
       .map((text) => text.replace(/\s+/g, ' ').trim())
       .filter(Boolean)
       .join(' | ');
+    const fields = await page
+      .evaluate(() => {
+        const read = (selector: string) => {
+          const element = document.querySelector<HTMLInputElement>(selector);
+          if (!element || element.offsetParent === null) return null;
+          return {
+            valor: element.value,
+            requerido: element.required,
+            invalido:
+              element.classList.contains('is-invalid') ||
+              element.getAttribute('aria-invalid') === 'true',
+          };
+        };
+        return {
+          documento: read('input[placeholder="DNI"], input[placeholder="RUC"], input[placeholder="CE"]'),
+          nombres: read('#names-input'),
+          paterno: read('input[placeholder="Apellido paterno"]'),
+          materno: read('input[placeholder="Apellido materno"]'),
+          celular: read('#phone-input'),
+        };
+      })
+      .catch(() => null);
 
     throw new ShalomError(
-      `Shalom no avanza del paso del destinatario${detail ? `: ${detail}` : ''}`,
+      `Shalom no avanza del paso del destinatario${detail ? `: ${detail}` : ''}${
+        fields ? ` | campos=${JSON.stringify(fields)}` : ''
+      }`,
       'PERMANENT',
     );
   }
