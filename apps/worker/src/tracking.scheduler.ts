@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../libs/database/src/prisma.service';
+import { WebhooksService } from './webhooks.service';
 
 const ACTIVE_STATUSES = ['REGISTRADO', 'EN_ORIGEN', 'EN_TRANSITO'] as const;
 
@@ -22,16 +23,19 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
   private readonly enabled: boolean;
   private readonly intervalMinutes: number;
   private readonly batchSize: number;
+  private readonly expiryHours: number;
   private timer: NodeJS.Timeout | null = null;
   private sweeping = false;
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly webhooks: WebhooksService,
     config: ConfigService,
   ) {
     this.enabled = (config.get<string>('SHALOM_TRACKING_ENABLED') ?? 'false') === 'true';
     this.intervalMinutes = Number(config.get<number>('SHALOM_TRACKING_INTERVAL_MINUTES') ?? 15);
     this.batchSize = Number(config.get<number>('SHALOM_TRACKING_BATCH') ?? 20);
+    this.expiryHours = Number(config.get<number>('SHALOM_ORDER_EXPIRY_HOURS') ?? 24);
   }
 
   onApplicationBootstrap(): void {
@@ -56,6 +60,8 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
     this.sweeping = true;
 
     try {
+      await this.expireOrders(now);
+
       const cutoff = new Date(now.getTime() - this.intervalMinutes * 60_000);
       const orders = await this.prisma.shalomOrder.findMany({
         where: {
@@ -94,6 +100,70 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
       return 0;
     } finally {
       this.sweeping = false;
+    }
+  }
+
+  /**
+   * Marca como vencidas las guias que no fueron recepcionadas en la agencia
+   * dentro del plazo (24 h por defecto). Emite el webhook para que Nuvex
+   * devuelva el envio a pendiente y permita generar una nueva guia.
+   */
+  private async expireOrders(now: Date) {
+    const limit = new Date(now.getTime() - this.expiryHours * 3_600_000);
+
+    const expired = await this.prisma.shalomOrder.findMany({
+      where: {
+        status: 'REGISTRADO',
+        orden: { not: null },
+        registeredAt: { lt: limit },
+        OR: [{ trackingProgress: null }, { trackingProgress: { lte: 0 } }],
+      },
+      select: { id: true, tenantId: true, orden: true, codigo: true },
+      take: 50,
+    });
+
+    for (const order of expired) {
+      try {
+        await this.prisma.shalomOrder.update({
+          where: { id: order.id },
+          data: {
+            status: 'ANULADO',
+            trackingStatus: 'Guía vencida',
+            trackingProgress: 0,
+          },
+        });
+
+        await this.prisma.shalomEvent.create({
+          data: {
+            orderId: order.id,
+            status: 'ANULADO',
+            progress: 0,
+            description: `Guía vencida: más de ${this.expiryHours} h sin recepción en agencia`,
+          },
+        });
+
+        await this.webhooks.enqueue({
+          tenantId: order.tenantId,
+          event: 'order.status_changed',
+          data: {
+            orderId: order.id,
+            orden: order.orden,
+            status: 'ANULADO',
+            progress: 0,
+            label: 'Guía vencida',
+            message: 'No se recibió en la agencia dentro del plazo',
+            steps: [],
+          },
+        });
+      } catch (error) {
+        this.logger.warn(
+          `No se pudo marcar vencida la guia ${order.orden}: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    if (expired.length > 0) {
+      this.logger.log(`Guias vencidas marcadas: ${expired.length}`);
     }
   }
 }

@@ -38,7 +38,7 @@ export function mapTracking(tracking: Pick<TrackingResult, 'estado' | 'mensaje' 
 
   const message = tracking.mensaje;
 
-  if (/anulado|cancelad/.test(estado)) {
+  if (/anulado|cancelad|vencid|expirad|eliminad|no existe|no registra/.test(estado)) {
     return { status: 'ANULADO', progress: progreso, label: tracking.estado ?? 'Anulado', message };
   }
 
