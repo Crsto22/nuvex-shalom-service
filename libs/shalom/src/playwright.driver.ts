@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright';
 
 import { BrowserPool } from './browser.pool';
@@ -78,8 +80,9 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     const title = PACKAGE_TITLES[input.packageType.toUpperCase()] ?? input.packageType;
 
     const context = await this.pool.acquire(storageState);
+    let page: Page | null = null;
     try {
-      const page = await context.newPage();
+      page = await context.newPage();
       await page.goto(`${this.baseUrl}${SHALOM_SELECTORS.individual.route}`, {
         waitUntil: 'domcontentloaded',
       });
@@ -119,11 +122,18 @@ export class PlaywrightShalomDriver implements ShalomDriver {
 
       await this.selectDeclaration(page, input.declarationType);
       await this.clickContinue(page);
+      await this.assertAdvancedPastRecipient(page);
 
-      // Paso 5: cobro seguro
-      await this.waitForText(page, /cobro seguro/i);
-      await this.chooseService(page, input.cashOnDelivery === true);
-      await this.clickContinue(page);
+      // Paso 5: cobro seguro (Shalom puede omitirlo segun el tramo)
+      const reachedCobro = await this.waitForAny(
+        page,
+        [/cobro seguro/i],
+        SHALOM_SELECTORS.individual.keypad,
+      );
+      if (reachedCobro === 'text') {
+        await this.chooseService(page, input.cashOnDelivery === true);
+        await this.clickContinue(page);
+      }
 
       // Paso 6: clave de seguridad
       await page.locator(SHALOM_SELECTORS.individual.keypad).first().waitFor({ timeout: 20_000 });
@@ -140,6 +150,11 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       );
 
       return { orden: result.orden, codigo, monto, reference: result.reference };
+    } catch (error) {
+      if (page) {
+        await this.captureFailure(page, input);
+      }
+      throw error;
     } finally {
       await this.pool.release(context);
     }
@@ -436,6 +451,92 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     await this.dismissPopups(page);
   }
 
+  /**
+   * Si el formulario del destinatario sigue visible es porque Shalom rechazo
+   * algun dato (documento, nombres o telefono). Fallar como PERMANENT evita
+   * gastar los reintentos del job y deja el motivo visible.
+   */
+  private async assertAdvancedPastRecipient(page: Page): Promise<void> {
+    await page.waitForTimeout(2_000);
+
+    const docInput = page
+      .locator(SHALOM_SELECTORS.individual.recipient.docInput)
+      .first();
+    const stillThere = await docInput.isVisible().catch(() => false);
+    if (!stillThere) return;
+
+    const errors = await page
+      .locator('.invalid-feedback, .text-danger, .swal2-html-container, .swal2-title')
+      .allInnerTexts()
+      .catch(() => []);
+    const detail = errors
+      .map((text) => text.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join(' | ');
+
+    throw new ShalomError(
+      `Shalom no avanza del paso del destinatario${detail ? `: ${detail}` : ''}`,
+      'PERMANENT',
+    );
+  }
+
+  /** Espera un texto o un selector visible, lo que aparezca primero. */
+  private async waitForAny(
+    page: Page,
+    patterns: RegExp[],
+    selector: string,
+    timeoutMs = 25_000,
+  ): Promise<'text' | 'selector'> {
+    const deadline = Date.now() + timeoutMs;
+    const target = page.locator(selector).first();
+
+    while (Date.now() < deadline) {
+      const text = await page.locator('body').innerText().catch(() => '');
+      if (patterns.some((pattern) => pattern.test(text))) return 'text';
+      if (
+        (await target.count().catch(() => 0)) > 0 &&
+        (await target.isVisible().catch(() => false))
+      ) {
+        return 'selector';
+      }
+      await page.waitForTimeout(400);
+    }
+
+    throw new ShalomError(
+      `La pantalla esperada no aparecio: ${patterns.join(' | ')}`,
+      'RETRYABLE',
+    );
+  }
+
+  /**
+   * Guarda una captura y el texto visible cuando un registro falla.
+   * Permite diagnosticar sin adivinar en que pantalla se quedo Shalom.
+   */
+  private async captureFailure(page: Page, input: RegisterOrderInput): Promise<void> {
+    const dir = process.env.SHALOM_ERROR_DIR ?? join(process.cwd(), 'artifacts', 'shalom-errors');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = join(dir, `register-${stamp}.png`);
+
+    try {
+      await mkdir(dir, { recursive: true });
+      await page.screenshot({ path: file, fullPage: true }).catch(() => undefined);
+
+      const text = (await page.locator('body').innerText().catch(() => ''))
+        .replace(/\s+/g, ' ')
+        .slice(0, 1_200);
+
+      this.logger.warn(
+        `[registro] fallo doc=${input.recipientDocument} url=${page.url()} captura=${file} pantalla="${text}"`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo capturar la pantalla del fallo: ${
+          error instanceof Error ? error.message : 'error desconocido'
+        }`,
+      );
+    }
+  }
+
   private async pickMultiselect(page: Page, label: string, search: string): Promise<boolean> {
     const boxes = page.locator(SHALOM_SELECTORS.individual.multiselect);
     const count = await boxes.count();
@@ -553,9 +654,10 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       }
     }
 
-    if (input.recipientPhone && (await phone.isVisible().catch(() => false))) {
+    const phoneValue = normalizeRecipientPhone(input.recipientPhone);
+    if (phoneValue && (await phone.isVisible().catch(() => false))) {
       const value = (await phone.inputValue().catch(() => '')).trim();
-      if (!value) await phone.fill(input.recipientPhone);
+      if (!value) await phone.fill(phoneValue);
     }
   }
 
@@ -653,6 +755,20 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       if (pattern.test(text)) return;
       await page.waitForTimeout(500);
     }
-    throw new ShalomError(`La pantalla esperada no aparecio: ${pattern}`, 'RETRYABLE');
+    const preview = (await page.locator('body').innerText().catch(() => ''))
+      .replace(/\s+/g, ' ')
+      .slice(0, 300);
+    throw new ShalomError(
+      `La pantalla esperada no aparecio: ${pattern}. Pantalla actual: "${preview}"`,
+      'RETRYABLE',
+    );
   }
+}
+
+/** Shalom acepta celulares peruanos de 9 digitos (sin +51). */
+function normalizeRecipientPhone(value?: string): string | null {
+  const digits = (value ?? '').replace(/\D/g, '');
+  if (!digits) return null;
+  const local = digits.length > 9 && digits.startsWith('51') ? digits.slice(2) : digits;
+  return /^9\d{8}$/.test(local) ? local : null;
 }
