@@ -156,7 +156,52 @@ export class ShalomJobProcessor {
       throw new ShalomError('Orden inexistente o sin numero de Shalom', 'PERMANENT');
     }
 
-    const tracking = await this.driver.tracking(order.orden, order.codigo);
+    let tracking;
+    try {
+      tracking = await this.driver.tracking(order.orden, order.codigo);
+    } catch (error) {
+      if (
+        error instanceof ShalomError &&
+        /no devolvio resultados|expirad|no existe|anulad|vencid/i.test(
+          error.message,
+        )
+      ) {
+        await this.prisma.shalomOrder.update({
+          where: { id: order.id },
+          data: {
+            status: 'ANULADO',
+            trackingStatus: 'Guía vencida',
+            trackingProgress: 0,
+            lastTrackedAt: new Date(),
+          },
+        });
+        await this.prisma.shalomEvent.create({
+          data: {
+            orderId: order.id,
+            status: 'ANULADO',
+            progress: 0,
+            description: error.message.slice(0, 300),
+          },
+        });
+        await this.webhooks.enqueue({
+          tenantId: order.tenantId,
+          event: 'order.status_changed',
+          data: {
+            orderId: order.id,
+            orden: order.orden,
+            externalRef: order.externalRef,
+            status: 'ANULADO',
+            progress: 0,
+            label: 'Guía vencida',
+            message: error.message,
+            steps: [],
+          },
+        });
+        return { orden: order.orden, status: 'ANULADO' };
+      }
+      throw error;
+    }
+
     const mapped = mapTracking(tracking);
     const changed =
       mapped.status !== order.status ||
