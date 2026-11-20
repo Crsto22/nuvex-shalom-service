@@ -25,7 +25,9 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
   private readonly batchSize: number;
   private readonly expiryHours: number;
   private timer: NodeJS.Timeout | null = null;
+  private expiryTimer: NodeJS.Timeout | null = null;
   private sweeping = false;
+  private expiring = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -39,8 +41,18 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
   }
 
   onApplicationBootstrap(): void {
+    // El vencimiento corre siempre, aunque el rastreo este deshabilitado.
+    const expiryMs = Math.max(5, this.intervalMinutes) * 60_000;
+    this.expiryTimer = setInterval(
+      () => void this.expireOrders(new Date()),
+      expiryMs,
+    );
+    setTimeout(() => void this.expireOrders(new Date()), 45_000);
+
     if (!this.enabled) {
-      this.logger.log('Barrido de rastreo deshabilitado');
+      this.logger.log(
+        'Barrido de rastreo deshabilitado (el vencimiento de guias sigue activo)',
+      );
       return;
     }
 
@@ -52,7 +64,9 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
 
   onApplicationShutdown(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.expiryTimer) clearInterval(this.expiryTimer);
     this.timer = null;
+    this.expiryTimer = null;
   }
 
   async sweep(now: Date = new Date()): Promise<number> {
@@ -109,6 +123,17 @@ export class TrackingScheduler implements OnApplicationBootstrap, OnApplicationS
    * devuelva el envio a pendiente y permita generar una nueva guia.
    */
   private async expireOrders(now: Date) {
+    if (this.expiring) return;
+    this.expiring = true;
+
+    try {
+      await this.expireOrdersBatch(now);
+    } finally {
+      this.expiring = false;
+    }
+  }
+
+  private async expireOrdersBatch(now: Date) {
     const limit = new Date(now.getTime() - this.expiryHours * 3_600_000);
 
     const expired = await this.prisma.shalomOrder.findMany({
