@@ -702,39 +702,73 @@ export class PlaywrightShalomDriver implements ShalomDriver {
     const maternal = page.locator(selectors.maternalInput).first();
     const phone = page.locator(selectors.phoneInput).first();
 
-    if ((await businessInput.count()) > 0 && (await businessInput.isVisible().catch(() => false))) {
+    const isVisible = async (locator: Locator) =>
+      (await locator.count().catch(() => 0)) > 0 &&
+      (await locator.isVisible().catch(() => false));
+    const currentValue = async (locator: Locator) =>
+      locator
+        .inputValue()
+        .then((value) => value.trim())
+        .catch(() => '');
+
+    if (await isVisible(businessInput)) {
       if (input.businessName) await businessInput.fill(input.businessName);
     }
 
-    if ((await nameInput.count()) > 0 && (await nameInput.isVisible().catch(() => false))) {
+    // Shalom muestra los inputs de nombres/apellidos solo cuando no pudo
+    // autocompletar desde su registro. Puede mostrar el bloque completo o
+    // solo los apellidos, asi que cada campo se evalua por separado.
+    const nameVisible = await isVisible(nameInput);
+    const paternalVisible = await isVisible(paternal);
+    const maternalVisible = await isVisible(maternal);
+
+    if (nameVisible) {
       // Dar tiempo a que Shalom autocomplete desde RENIEC antes de escribir.
       let current = '';
       const deadline = Date.now() + 8_000;
       while (Date.now() < deadline) {
-        current = (await nameInput.inputValue().catch(() => '')).trim();
+        current = await currentValue(nameInput);
         if (current) break;
         await page.waitForTimeout(500);
       }
 
-      if (!current) {
-        const missing = [
-          !input.recipientName ? 'nombres' : null,
-          !input.recipientPaternalLastName ? 'apellido paterno' : null,
-          !input.recipientMaternalLastName ? 'apellido materno' : null,
-        ].filter(Boolean);
-
-        if (missing.length > 0) {
-          throw new ShalomError(
-            `Shalom no reconocio el documento ${input.recipientDocument}; faltan ${missing.join(', ')}. Completa los datos del destinatario en Nuvex.`,
-            'PERMANENT',
-          );
-        }
-
-        await nameInput.fill(input.recipientName!);
-        await paternal.fill(input.recipientPaternalLastName!);
-        await maternal.fill(input.recipientMaternalLastName!);
+      if (!current && input.recipientName) {
+        await nameInput.fill(input.recipientName);
         await page.waitForTimeout(300);
       }
+    }
+
+    if (
+      paternalVisible &&
+      input.recipientPaternalLastName &&
+      !(await currentValue(paternal))
+    ) {
+      await paternal.fill(input.recipientPaternalLastName);
+      await page.waitForTimeout(300);
+    }
+
+    if (
+      maternalVisible &&
+      input.recipientMaternalLastName &&
+      !(await currentValue(maternal))
+    ) {
+      await maternal.fill(input.recipientMaternalLastName);
+      await page.waitForTimeout(300);
+    }
+
+    // Si Shalom exige el dato y sigue vacio, se falla con el campo exacto.
+    const missing: string[] = [];
+    if (nameVisible && !(await currentValue(nameInput))) missing.push('nombres');
+    if (paternalVisible && !(await currentValue(paternal)))
+      missing.push('apellido paterno');
+    if (maternalVisible && !(await currentValue(maternal)))
+      missing.push('apellido materno');
+
+    if (missing.length > 0) {
+      throw new ShalomError(
+        `Shalom no reconocio el documento ${input.recipientDocument}; faltan ${missing.join(', ')}. Completa los datos del destinatario en Nuvex.`,
+        'PERMANENT',
+      );
     }
 
     const phoneValue = normalizeRecipientPhone(input.recipientPhone);
