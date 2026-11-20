@@ -884,19 +884,56 @@ export class PlaywrightShalomDriver implements ShalomDriver {
   }
 
   private async fetchOrderCode(page: Page, orden: string): Promise<string | null> {
-    await page.goto(`${this.baseUrl}${SHALOM_SELECTORS.pending.route}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(3_000);
+    await page.goto(`${this.baseUrl}${SHALOM_SELECTORS.pending.route}`, {
+      waitUntil: 'domcontentloaded',
+    });
 
-    return page.evaluate((target) => {
-      const rows = Array.from(document.querySelectorAll('.shipment-row'));
-      for (const row of rows) {
-        const number = (row.querySelector('.order-number') as HTMLElement | null)?.innerText.trim();
-        if (number === target) {
-          return (row.querySelector('.code-value') as HTMLElement | null)?.innerText.trim() ?? null;
-        }
+    // La lista de pendientes es una SPA: puede tardar en pintar la fila.
+    // Se reintenta con recarga en vez de confiar en una espera fija.
+    const attempts = 5;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (attempt > 1) {
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
       }
-      return null;
-    }, orden);
+
+      await page
+        .locator(SHALOM_SELECTORS.pending.row)
+        .first()
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .catch(() => undefined);
+      await page.waitForTimeout(1_200);
+
+      const codigo = await page.evaluate(
+        ({ target, row, orderNumber, codeValue }) => {
+          const rows = Array.from(document.querySelectorAll(row));
+          for (const element of rows) {
+            const number = (element.querySelector(orderNumber) as HTMLElement | null)
+              ?.innerText.trim();
+            if (number === target) {
+              const code = (element.querySelector(codeValue) as HTMLElement | null)
+                ?.innerText.trim();
+              return code || null;
+            }
+          }
+          return null;
+        },
+        {
+          target: orden,
+          row: SHALOM_SELECTORS.pending.row,
+          orderNumber: SHALOM_SELECTORS.pending.orderNumber,
+          codeValue: SHALOM_SELECTORS.pending.codeValue,
+        },
+      );
+
+      if (codigo) return codigo;
+
+      this.logger.warn(
+        `[registro] codigo de la orden ${orden} no aparece en la lista (intento ${attempt}/${attempts})`,
+      );
+      await page.waitForTimeout(1_500 * attempt);
+    }
+
+    return null;
   }
 
   private async waitForText(page: Page, pattern: RegExp): Promise<void> {

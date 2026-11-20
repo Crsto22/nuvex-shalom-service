@@ -1,7 +1,16 @@
-import { BadRequestException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 
 import { PrismaService } from '../../../../../libs/database/src/prisma.service';
+import { SessionManager } from '../../../../../libs/session/src/session-manager.service';
 import { isWithinWindow, startOfDayInTimeZone } from '../../../../../libs/shalom/src/schedule';
+import { SHALOM_DRIVER } from '../../../../../libs/shalom/src/tokens';
+import type { ShalomDriver } from '../../../../../libs/shalom/src/types';
 import type { CreateOrderDto } from './dto/create-order.dto';
 
 export type CreateOrderResponse = {
@@ -26,7 +35,34 @@ export type CreateOrderResponse = {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sessions: SessionManager,
+    @Inject(SHALOM_DRIVER) private readonly driver: ShalomDriver,
+  ) {}
+
+  /**
+   * Relee el codigo corto de una orden ya registrada. Se usa cuando el
+   * registro no pudo leerlo (la lista de pendientes tarda en cargar).
+   */
+  async refreshCode(tenantId: string, orden: string) {
+    const order = await this.prisma.shalomOrder.findFirst({
+      where: { tenantId, orden },
+    });
+    if (!order) throw new NotFoundException('Orden no encontrada');
+
+    const storageState = await this.sessions.requireStorageState(tenantId);
+    const codigo = await this.driver.getOrderCode(orden, storageState);
+
+    if (codigo && codigo !== order.codigo) {
+      await this.prisma.shalomOrder.update({
+        where: { id: order.id },
+        data: { codigo },
+      });
+    }
+
+    return { orden, codigo: codigo ?? order.codigo ?? null };
+  }
 
   async create(
     tenantId: string,

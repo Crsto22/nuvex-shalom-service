@@ -33,6 +33,12 @@ export class OrdersController {
     return this.orders.create(tenantId, dto, wait === 'true' || wait === '1');
   }
 
+  @Get('orders/by-order/:orden/code')
+  @Scopes('shalom:orders:read')
+  refreshCode(@Param('orden') orden: string, @Auth() auth: AuthContext) {
+    return this.orders.refreshCode(auth.tenantId, orden);
+  }
+
   @Get('orders/:orderId')
   @Scopes('shalom:orders:read')
   getOrder(@Param('orderId') orderId: string, @Auth() auth: AuthContext) {
