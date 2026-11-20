@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright';
 
 import { BrowserPool } from './browser.pool';
+import { stripAgencyPlaceholder } from './agency-name';
 import { securityKeyIssue } from './security-key';
 import { PACKAGE_TITLES, SHALOM_SELECTORS } from './selectors';
 import {
@@ -611,6 +612,9 @@ export class PlaywrightShalomDriver implements ShalomDriver {
   }
 
   private async pickMultiselect(page: Page, label: string, search: string): Promise<boolean> {
+    // Algunas agencias vienen del directorio con el sufijo "(POR DEFINIR)",
+    // pero el formulario de registro las lista con el nombre limpio.
+    const term = stripAgencyPlaceholder(search);
     const boxes = page.locator(SHALOM_SELECTORS.individual.multiselect);
     const count = await boxes.count();
 
@@ -625,12 +629,12 @@ export class PlaywrightShalomDriver implements ShalomDriver {
       await page.waitForTimeout(700);
 
       const input = box.locator(SHALOM_SELECTORS.individual.multiselectInput).first();
-      await input.fill(search);
+      await input.fill(term);
       await page.waitForTimeout(1_800);
 
       const options = box.locator(SHALOM_SELECTORS.individual.multiselectOption);
       const optionCount = await options.count();
-      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const matching = options.filter({ hasText: new RegExp(escaped, 'i') });
       const matchingCount = await matching.count();
 
@@ -639,14 +643,27 @@ export class PlaywrightShalomDriver implements ShalomDriver {
         const optionText = (await matching.nth(optionIndex).innerText().catch(() => ''))
           .replace(/\s+/g, ' ')
           .trim();
-        if (optionText.toLowerCase().endsWith(search.toLowerCase())) {
+        if (optionText.toLowerCase().endsWith(term.toLowerCase())) {
           chosen = optionIndex;
           break;
         }
       }
 
       if (chosen < 0 && matchingCount > 0) chosen = 0;
-      if (chosen < 0 || optionCount === 0) return false;
+      if (chosen < 0 || optionCount === 0) {
+        // Sin coincidencias: se registran las opciones disponibles para saber
+        // si la agencia existe en el combo y con que nombre aparece.
+        const available = (await options.allInnerTexts().catch(() => []))
+          .map((value) => value.replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .slice(0, 20);
+        this.logger.warn(
+          `[registro] Sin coincidencias para "${term}" en ${label}. Opciones del combo (${optionCount}): ${
+            available.join(' | ').slice(0, 900) || '(vacio)'
+          }`,
+        );
+        return false;
+      }
 
       await matching.nth(chosen).click({ timeout: 8_000 });
       await page.waitForTimeout(1_800);
